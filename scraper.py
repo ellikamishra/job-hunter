@@ -74,6 +74,39 @@ def _is_career_page(soup, url):
     return sum(1 for s in career_signals if s in text) >= 2
 
 
+def _extract_qualification_section(text_lower: str) -> str:
+    """
+    Extract the qualifications / requirements section from job text.
+    If no such section is found, return empty string (not the full text).
+    """
+    section_patterns = [
+        r'(?:minimum\s+)?qualifications?[:\s]',
+        r'(?:basic|required|minimum)\s+requirements?[:\s]',
+        r'requirements?[:\s]',
+        r'what\s+(?:we(?:\'re|\s+are)\s+looking\s+for|you(?:\'ll)?\s+need|you\s+bring)[:\s]',
+        r'who\s+you\s+are[:\s]',
+        r'about\s+you[:\s]',
+        r'must\s+have[:\s]',
+        r'experience\s+(?:required|needed)[:\s]',
+        r'you\s+(?:should\s+)?have[:\s]',
+    ]
+    for pat in section_patterns:
+        m = re.search(pat, text_lower)
+        if m:
+            start = m.start()
+            rest = text_lower[start:]
+            next_section = re.search(
+                r'\n\s*(?:preferred|nice\s+to\s+have|bonus|benefits|perks|what\s+we\s+offer|'
+                r'about\s+(?:the|us)|our\s+(?:team|company|culture)|responsibilities|'
+                r'the\s+role|role\s+overview|job\s+description)',
+                rest[20:]
+            )
+            if next_section:
+                return rest[:20 + next_section.start()]
+            return rest[:1500]
+    return ""
+
+
 def _extract_min_years(text_lower: str) -> int | None:
     """
     Return the minimum years of experience mentioned in the text, or None
@@ -105,7 +138,9 @@ def _extract_min_years(text_lower: str) -> int | None:
 
 def _extract_experience_from_text(text: str) -> str:
     text_lower = text.lower()
-    years = _extract_min_years(text_lower)
+    qual_section = _extract_qualification_section(text_lower)
+    check_text = qual_section if qual_section else text_lower
+    years = _extract_min_years(check_text)
     if years is not None:
         for level, cfg in EXPERIENCE_LEVELS.items():
             if level == "any":
@@ -133,12 +168,37 @@ def _extract_location_from_text(text):
     return ""
 
 
+# Short skill names that collide with common English words.
+_AMBIGUOUS_SKILLS = {"go", "r", "c", "ai", "sas", "dart"}
+
+# Contextual patterns: "Go" must appear near a programming/tech context
+_TECH_CONTEXT_PATTERN = (
+    r'(?:golang|go\s+(?:lang(?:uage)?|programming|developer|engineer|code|sdk|module|routine|channel|goroutine))'
+    r'|(?:(?:written|built|coded|proficien\w*|experienc\w*|knowledge|fluency|familiar\w*|expert\w*)\s+(?:in|with)\s+go\b)'
+    r'|(?:go[/,]\s*\w+)'     # "Go, Python" / "Go/Python"
+    r'|(?:\w+[/,]\s*go\b)'   # "Python, Go" / "Python/Go"
+)
+
+
 def _matches_skills(text, skills):
     text_lower = text.lower()
     matched = []
     for skill in skills:
         skill_lower = skill.lower()
-        if " " in skill_lower:
+        if skill_lower in _AMBIGUOUS_SKILLS:
+            if skill_lower == "go":
+                if re.search(_TECH_CONTEXT_PATTERN, text_lower):
+                    matched.append(skill)
+            elif skill_lower == "r":
+                if re.search(r'(?:\bR[/,]\s*(?:python|sql|matlab|sas|stata))|(?:(?:python|sql|matlab|sas|stata)[/,]\s*R\b)|(?:(?:proficien\w*|experienc\w*|knowledge|familiar\w*)\s+(?:in|with)\s+R\b)|(?:\bR\s+(?:programming|language|studio|shiny|package))', text):
+                    matched.append(skill)
+            elif skill_lower == "c":
+                if re.search(r'(?:\bC[/,]\s*(?:C\+\+|python|java|go|rust))|(?:(?:C\+\+|python|java|go|rust)[/,]\s*C\b)|(?:(?:proficien\w*|experienc\w*|knowledge|familiar\w*)\s+(?:in|with)\s+C\b)|(?:\bC\s+(?:programming|language|code))', text):
+                    matched.append(skill)
+            else:
+                if re.search(r'\b' + re.escape(skill_lower) + r'\b', text_lower):
+                    matched.append(skill)
+        elif " " in skill_lower:
             if skill_lower in text_lower:
                 matched.append(skill)
         else:
@@ -150,22 +210,26 @@ def _matches_skills(text, skills):
 def _matches_experience(text: str, exp_levels: list[str]) -> bool:
     """
     Return True when the job text matches any of the requested experience levels.
-    Strictly rejects jobs that match HIGHER levels than requested.
-    Jobs with no experience info pass only if no higher-level keywords are found.
+
+    Strategy: look for experience info in the qualifications/requirements section
+    first (more accurate). Fall back to full text only for keyword matching.
+    If NO experience info is found anywhere, keep the job (benefit of the doubt).
     """
     if not exp_levels or "any" in [e.lower() for e in exp_levels]:
         return True
     text_lower = text.lower()
-    years = _extract_min_years(text_lower)
-
     requested = {e.lower() for e in exp_levels}
 
     # All ordered levels (excluding "any")
     _ORDERED_LEVELS = ["intern", "entry", "mid", "senior", "staff"]
-    # Levels NOT requested
     excluded = {lvl for lvl in _ORDERED_LEVELS if lvl not in requested}
 
-    # If years are found, check if they fall in a requested range
+    # Try to extract the qualifications section for year-based matching
+    qual_section = _extract_qualification_section(text_lower)
+    check_text = qual_section if qual_section else text_lower
+
+    # Check years in the qualification section (or full text if no section found)
+    years = _extract_min_years(check_text)
     if years is not None:
         for level in requested:
             if level not in EXPERIENCE_LEVELS:
@@ -176,8 +240,8 @@ def _matches_experience(text: str, exp_levels: list[str]) -> bool:
         # Years found but don't match any requested level → reject
         return False
 
-    # No year info — check keywords
-    # First, reject if any EXCLUDED level's keywords match
+    # No year info — check keywords in full text (title + description)
+    # Reject if excluded level keywords match
     for lvl in excluded:
         if lvl not in EXPERIENCE_LEVELS:
             continue
@@ -185,7 +249,7 @@ def _matches_experience(text: str, exp_levels: list[str]) -> bool:
             if kw in text_lower:
                 return False
 
-    # Accept if any REQUESTED level's keywords match
+    # Accept if requested level keywords match
     for lvl in requested:
         if lvl not in EXPERIENCE_LEVELS:
             continue
@@ -193,7 +257,7 @@ def _matches_experience(text: str, exp_levels: list[str]) -> bool:
             if kw in text_lower:
                 return True
 
-    # No experience info at all — include (benefit of doubt)
+    # No experience info at all — keep the job (benefit of the doubt)
     return True
 
 
@@ -204,7 +268,7 @@ def _matches_location(text, locations):
     return any(loc.lower() in text_lower for loc in locations)
 
 
-def _try_greenhouse_api(slug, session, company_name, skills, locations, exp_levels):
+def _try_greenhouse_api(slug, session, company_name, skills, locations, exp_levels, field=""):
     url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
     data = _get_json(url, session)
     if not data or "jobs" not in data:
@@ -212,6 +276,8 @@ def _try_greenhouse_api(slug, session, company_name, skills, locations, exp_leve
     jobs = []
     for item in data["jobs"]:
         title = item.get("title", "")
+        if not _is_technical_role(title, field):
+            continue
         location = item.get("location", {}).get("name", "")
         link = item.get("absolute_url", "")
         content_text = ""
@@ -219,7 +285,7 @@ def _try_greenhouse_api(slug, session, company_name, skills, locations, exp_leve
             detail = _get_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{item['id']}", session)
             if detail and detail.get("content"):
                 content_text = BeautifulSoup(detail["content"], "lxml").get_text(separator=" ", strip=True)
-            time.sleep(0.1)
+            time.sleep(0.3)
         full_text = f"{title} {location} {content_text}"
         skill_matches = _matches_skills(full_text, skills) if skills else []
         if skills and not skill_matches:
@@ -236,13 +302,15 @@ def _try_greenhouse_api(slug, session, company_name, skills, locations, exp_leve
     return jobs
 
 
-def _try_lever_api(slug, session, company_name, skills, locations, exp_levels):
+def _try_lever_api(slug, session, company_name, skills, locations, exp_levels, field=""):
     data = _get_json(f"https://api.lever.co/v0/postings/{slug}?mode=json", session)
     if not data or not isinstance(data, list):
         return []
     jobs = []
     for item in data:
         title = item.get("text", "")
+        if not _is_technical_role(title, field):
+            continue
         categories = item.get("categories", {})
         location = categories.get("location", "")
         link = item.get("hostedUrl", "") or item.get("applyUrl", "")
@@ -269,13 +337,15 @@ def _try_lever_api(slug, session, company_name, skills, locations, exp_levels):
     return jobs
 
 
-def _try_ashby_api(slug, session, company_name, skills, locations, exp_levels):
+def _try_ashby_api(slug, session, company_name, skills, locations, exp_levels, field=""):
     data = _get_json("https://api.ashbyhq.com/posting-api/job-board/" + slug, session)
     if not data or "jobs" not in data:
         return []
     jobs = []
     for item in data["jobs"]:
         title = item.get("title", "")
+        if not _is_technical_role(title, field):
+            continue
         location = item.get("location", "")
         link = item.get("jobUrl", "") or item.get("applicationUrl", "")
         full_text = f"{title} {location} {item.get('department', '')}"
@@ -760,7 +830,7 @@ def scrape_company_jobs(company, skills, locations, exp_levels, session, field="
         print(f"  [>] Known ATS: {platform} slug '{known_slug}'")
         api_map = {"greenhouse": _try_greenhouse_api, "lever": _try_lever_api, "ashby": _try_ashby_api}
         if platform in api_map:
-            r = api_map[platform](known_slug, session, company_name, skills, locations, exp_levels)
+            r = api_map[platform](known_slug, session, company_name, skills, locations, exp_levels, field=field)
             if r:
                 print(f"  [+] {platform} API: {len(r)} jobs")
                 all_jobs.extend(r)
@@ -773,7 +843,7 @@ def scrape_company_jobs(company, skills, locations, exp_levels, session, field="
             if all_jobs:
                 break
             print(f"  [>] Trying {api_name} slug '{slug}'…")
-            r = api_func(slug, session, company_name, skills, locations, exp_levels)
+            r = api_func(slug, session, company_name, skills, locations, exp_levels, field=field)
             if r:
                 print(f"  [+] {api_name}: {len(r)} jobs")
                 all_jobs.extend(r)
@@ -789,7 +859,7 @@ def scrape_company_jobs(company, skills, locations, exp_levels, session, field="
             if all_jobs:
                 break
             for api_func in [_try_greenhouse_api, _try_lever_api, _try_ashby_api]:
-                r = api_func(alt, session, company_name, skills, locations, exp_levels)
+                r = api_func(alt, session, company_name, skills, locations, exp_levels, field=field)
                 if r:
                     print(f"  [+] ATS with slug '{alt}': {len(r)} jobs")
                     all_jobs.extend(r)
@@ -896,6 +966,7 @@ def discover_companies_from_web(
                     timeout=REQUEST_TIMEOUT,
                 )
                 if resp.status_code != 200:
+                    _log(f"  [!] LinkedIn returned HTTP {resp.status_code} for query: {query[:60]}")
                     return
                 soup = BeautifulSoup(resp.text, "lxml")
                 cards = soup.find_all("div", class_=lambda c: c and "base-card" in c)
@@ -907,9 +978,10 @@ def discover_companies_from_web(
                         _add(company_el.get_text(strip=True))
                     if len(found) >= max_companies:
                         return
-            except Exception:
+            except Exception as e:
+                _log(f"  [!] LinkedIn request failed: {e}")
                 return
-            time.sleep(0.15)
+            time.sleep(1.0)
 
     # ── Strategy 1: LinkedIn — individual skill queries (high diversity) ───────
     _log("[>] Discovering companies via LinkedIn (by skill)…")
@@ -978,6 +1050,7 @@ def discover_companies_from_web(
                 timeout=REQUEST_TIMEOUT,
             )
             if resp.status_code != 200:
+                _log(f"  [!] Google returned HTTP {resp.status_code} (may be rate-limited/blocked)")
                 continue
             soup = BeautifulSoup(resp.text, "lxml")
             for a_tag in soup.find_all("a", href=True):
@@ -996,9 +1069,10 @@ def discover_companies_from_web(
                     _log(f"  [+] Discovered: {name} ({domain})")
                 if len(found) >= max_companies:
                     break
-        except Exception:
+        except Exception as e:
+            _log(f"  [!] Google search failed: {e}")
             continue
-        time.sleep(0.2)
+        time.sleep(1.0)
 
     _log(f"[=] Discovered {len(found)} unique companies")
     return list(found.values())

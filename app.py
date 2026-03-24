@@ -185,6 +185,8 @@ for key, default in {
     "custom_skills": [],
     "custom_job_locs": [],
     "editing_search": None,
+    "last_scrape_empty": False,
+    "results_history": [],  # list of (timestamp, description, df)
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -477,7 +479,7 @@ elif st.session_state.page == "scraper":
         nav_cols = st.columns(3)
         if nav_cols[0].button("Change field", use_container_width=True):
             st.session_state.page = "landing"
-            st.session_state.results_df = pd.DataFrame()
+            # Keep results_df so user doesn't lose previous results
             st.rerun()
         if nav_cols[1].button("My Searches", use_container_width=True):
             st.session_state.page = "my_searches"
@@ -677,6 +679,11 @@ elif st.session_state.page == "scraper":
                 progress_callback=_discover_progress,
             )
             n_web = len(discovered)
+            if n_web == 0:
+                discover_placeholder.warning(
+                    "Web discovery returned 0 companies — LinkedIn and Google likely blocked "
+                    "the automated requests (403 / CAPTCHA). Falling back to the local database."
+                )
 
             db_companies = get_companies_for_location(
                 all_job_locs if all_job_locs else ["any"], None
@@ -756,7 +763,7 @@ elif st.session_state.page == "scraper":
                 cap.lines.append(f"  [!] Error: {e}")
             return company, jobs, cap.lines
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {executor.submit(_scrape_one_company, c): c for c in companies}
             for future in as_completed(futures):
                 company, jobs, lines = future.result()
@@ -786,9 +793,27 @@ elif st.session_state.page == "scraper":
         progress_bar.progress(100, text="Done!")
         live_status.empty()
         live_table.empty()
-        st.success(f"Scraping complete -- **{len(all_jobs)}** jobs found across {len(companies)} companies")
+        if all_jobs:
+            st.success(f"Scraping complete -- **{len(all_jobs)}** jobs found across {len(companies)} companies")
+            st.session_state.last_scrape_empty = False
+        else:
+            st.warning(
+                f"Scraping complete -- **0 jobs** found across {len(companies)} companies. "
+                "Try broadening your skills/location filters, or switch to "
+                "**Auto-generate from location** mode which uses the local company database."
+            )
+            st.session_state.last_scrape_empty = True
         st.session_state.results_df = _jobs_to_df(all_jobs)
         st.session_state.log_lines = log_lines
+        # Save to history so results survive navigation
+        if all_jobs:
+            desc = f"{len(all_jobs)} jobs | {', '.join(all_skills[:3]) if all_skills else 'Any skills'}"
+            st.session_state.results_history.insert(0, (
+                time.strftime("%H:%M:%S"),
+                desc,
+                st.session_state.results_df.copy(),
+            ))
+            st.session_state.results_history = st.session_state.results_history[:5]
 
         # ── Save search if requested ─────────────────────────────────────────
         if save_this_search and all_jobs:
@@ -895,16 +920,39 @@ elif st.session_state.page == "scraper":
         )
 
     elif not run_btn:
-        st.markdown(
-            """
-            ### How to use
+        if st.session_state.last_scrape_empty:
+            st.warning(
+                "Your last scrape returned **0 jobs**. This can happen when:\n"
+                "- **Discover from web** mode: LinkedIn/Google blocked the automated requests (403/CAPTCHA)\n"
+                "- Skill or location filters were too narrow\n\n"
+                "**Tip:** Try **Auto-generate from location** mode in the sidebar — it uses a curated "
+                "local database and doesn't depend on external sites."
+            )
+            st.session_state.last_scrape_empty = False
 
-            1. **Choose a company source** in the sidebar
-            2. **Add skills** from the dropdown or type custom ones
-            3. **Set job location filter** to narrow postings by city/remote
-            4. **Select experience levels** -- intern through staff
-            5. **Check "Save this search"** to enable daily automated scraping
-            6. Hit **Start Scraping** and watch results populate in real time
-            7. You'll receive email notifications when new jobs are found (if SMTP is configured)
-            """
-        )
+        # Show previous results if available
+        if st.session_state.results_history:
+            st.subheader("Previous results")
+            st.caption("Your past scrape runs (kept in memory). Click to restore.")
+            for i, (ts, desc, hist_df) in enumerate(st.session_state.results_history):
+                col_desc, col_btn = st.columns([4, 1])
+                col_desc.markdown(f"**{ts}** — {desc}")
+                if col_btn.button("Restore", key=f"restore_{i}", use_container_width=True):
+                    st.session_state.results_df = hist_df
+                    st.rerun()
+            st.divider()
+
+        if not st.session_state.last_scrape_empty:
+            st.markdown(
+                """
+                ### How to use
+
+                1. **Choose a company source** in the sidebar
+                2. **Add skills** from the dropdown or type custom ones
+                3. **Set job location filter** to narrow postings by city/remote
+                4. **Select experience levels** -- intern through staff
+                5. **Check "Save this search"** to enable daily automated scraping
+                6. Hit **Start Scraping** and watch results populate in real time
+                7. You'll receive email notifications when new jobs are found (if SMTP is configured)
+                """
+            )
