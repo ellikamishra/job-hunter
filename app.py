@@ -31,7 +31,6 @@ from db import (
 from excel_io import read_companies
 from notifier import is_smtp_configured, send_job_notification
 from scraper import scrape_company_jobs, discover_companies_from_web
-from scheduler import start_scheduler_thread
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -40,11 +39,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# ── Start background scheduler (once per process) ────────────────────────────
-if "scheduler_started" not in st.session_state:
-    start_scheduler_thread(interval_hours=24)
-    st.session_state.scheduler_started = True
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 VALID_CATEGORIES = ["big_tech", "startup", "quant", "trading", "fintech"]
@@ -186,7 +180,7 @@ for key, default in {
     "custom_job_locs": [],
     "editing_search": None,
     "last_scrape_empty": False,
-    "results_history": [],  # list of (timestamp, description, df)
+    "results_history": [],  # list of (timestamp, description, df) — capped at 1 to limit memory
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -813,7 +807,7 @@ elif st.session_state.page == "scraper":
                 desc,
                 st.session_state.results_df.copy(),
             ))
-            st.session_state.results_history = st.session_state.results_history[:5]
+            st.session_state.results_history = st.session_state.results_history[:1]
 
         # ── Save search if requested ─────────────────────────────────────────
         if save_this_search and all_jobs:
