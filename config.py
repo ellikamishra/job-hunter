@@ -70,7 +70,7 @@ EXPERIENCE_LEVELS = {
         "keywords": [
             "mid level", "mid-level", "intermediate", "mid-senior",
         ],
-        "year_range": (2, 4),   # 2–4 years
+        "year_range": (2, 3),   # 2–3 years
     },
     "senior": {
         "keywords": [
