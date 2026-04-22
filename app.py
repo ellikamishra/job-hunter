@@ -328,7 +328,7 @@ elif st.session_state.page == "my_searches":
                 f"{'[Active]' if s['active'] else '[Paused]'} {s['name']} -- "
                 f"{s['field'] or 'Any field'} | "
                 f"Skills: {', '.join(s['skills'][:3])}{'...' if len(s['skills']) > 3 else ''} | "
-                f"Updated: {s['updated_at'][:10]}",
+                f"Updated: {s['updated_at'].strftime('%Y-%m-%d') if s['updated_at'] else 'N/A'}",
                 expanded=False,
             ):
                 col1, col2 = st.columns(2)
